@@ -26,8 +26,7 @@ Use the requested virtual environment:
   --output /iopsstor/scratch/cscs/anunay/swissai/Apertus-1p5-8B-SFT-RL-DPO-SDPO-Low-mm-output-pruned
 ```
 
-The output path must not already exist. By default unchanged files are hard
-linked where the filesystem permits, so the conversion only consumes space for
-the rewritten `lm_head` shard. Add `--copy-unchanged` to make independent
-copies of all files, or `--dry-run` to validate the source without writing.
-Positional source/output paths are also supported.
+The output path must not already exist. Unchanged files are copied into the
+converted checkpoint, so the output is independent from the source directory.
+Use `--dry-run` to validate the source without writing. Positional source/output
+paths are also supported.

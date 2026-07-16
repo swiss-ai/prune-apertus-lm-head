@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import shutil
 import sys
 import uuid
@@ -51,7 +50,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--copy-unchanged",
         action="store_true",
-        help="Copy unchanged files instead of hard-linking them when possible.",
+        help="Deprecated; unchanged files are always copied.",
     )
     parser.add_argument(
         "--dry-run",
@@ -70,24 +69,15 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def copy_unchanged(source: Path, destination: Path, *, force_copy: bool) -> None:
-    """Copy a file, preferring hard links to avoid duplicating unchanged weights."""
-    if force_copy:
-        shutil.copy2(source, destination)
-        return
-
-    try:
-        os.link(source, destination)
-    except OSError:
-        shutil.copy2(source, destination)
+def copy_unchanged(source: Path, destination: Path) -> None:
+    """Copy an unchanged file into the converted checkpoint."""
+    shutil.copy2(source, destination)
 
 
 def copy_non_model_files(
     source: Path,
     destination: Path,
     model_shards: set[str],
-    *,
-    force_copy: bool,
 ) -> None:
     for item in source.iterdir():
         if item.name in model_shards or item.name in {MODEL_INDEX_NAME, "config.json"}:
@@ -97,12 +87,10 @@ def copy_non_model_files(
             shutil.copytree(
                 item,
                 target,
-                copy_function=lambda src, dst: copy_unchanged(
-                    Path(src), Path(dst), force_copy=force_copy
-                ),
+                copy_function=lambda src, dst: copy_unchanged(Path(src), Path(dst)),
             )
         else:
-            copy_unchanged(item, target, force_copy=force_copy)
+            copy_unchanged(item, target)
 
 
 def inspect_source(source: Path) -> tuple[dict, dict, Path, int, int, int]:
@@ -163,6 +151,19 @@ def write_pruned_head(source: Path, destination: Path) -> None:
     save_file(tensors, destination, metadata=metadata)
 
 
+def calculate_checkpoint_metadata(checkpoint: Path, shard_names: set[str]) -> dict:
+    total_parameters = 0
+    total_size = 0
+    for shard_name in shard_names:
+        with safe_open(checkpoint / shard_name, framework="pt", device="cpu") as weights:
+            for key in weights.keys():
+                tensor = weights.get_tensor(key)
+                total_parameters += tensor.numel()
+                total_size += tensor.numel() * tensor.element_size()
+                del tensor
+    return {"total_parameters": total_parameters, "total_size": total_size}
+
+
 def convert(args: argparse.Namespace) -> None:
     source = args.source.resolve()
     output = args.output.resolve()
@@ -190,9 +191,7 @@ def convert(args: argparse.Namespace) -> None:
     temporary.mkdir(parents=True)
     try:
         model_shards = set(index["weight_map"].values())
-        copy_non_model_files(
-            source, temporary, model_shards, force_copy=args.copy_unchanged
-        )
+        copy_non_model_files(source, temporary, model_shards)
 
         for shard_name in sorted(model_shards):
             source_shard = source / shard_name
@@ -200,14 +199,13 @@ def convert(args: argparse.Namespace) -> None:
             if source_shard == head_shard:
                 write_pruned_head(source_shard, target_shard)
             else:
-                copy_unchanged(source_shard, target_shard, force_copy=args.copy_unchanged)
+                copy_unchanged(source_shard, target_shard)
 
         config["output_vocab_size"] = IMAGE_TOKEN_START
         (temporary / "config.json").write_text(json.dumps(config, indent=2) + "\n")
 
         metadata = index.setdefault("metadata", {})
-        if "total_size" in metadata:
-            metadata["total_size"] -= removed_bytes
+        metadata.update(calculate_checkpoint_metadata(temporary, model_shards))
         (temporary / MODEL_INDEX_NAME).write_text(json.dumps(index, indent=2) + "\n")
 
         temporary.replace(output)
