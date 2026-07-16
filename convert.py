@@ -1,5 +1,5 @@
 #!/opt/venv/bin/python
-"""Remove Apertus image/audio token rows from the output projection only."""
+"""Remove Apertus multimodal token rows from the output projection only."""
 
 from __future__ import annotations
 
@@ -14,6 +14,9 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 
 
+MULTIMODAL_TOKEN_START = 131_072
+OMNI_TOKEN_START = 131_072
+OMNI_TOKEN_END = 131_271
 IMAGE_TOKEN_START = 131_272
 IMAGE_TOKEN_END = 262_343
 AUDIO_TOKEN_START = 262_344
@@ -25,8 +28,9 @@ MODEL_INDEX_NAME = "model.safetensors.index.json"
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Create an Apertus checkpoint whose lm_head cannot generate image "
-            "or audio code token IDs. Input embeddings and the tokenizer are kept."
+            "Create an Apertus checkpoint whose lm_head cannot generate omni, "
+            "image, or audio token IDs. Input embeddings and the tokenizer are "
+            "kept."
         )
     )
     parser.add_argument(
@@ -125,10 +129,10 @@ def inspect_source(source: Path) -> tuple[dict, dict, Path, int, int, int]:
         element_size = tensor.element_size()
         del tensor
 
-    if rows <= IMAGE_TOKEN_START:
+    if rows <= MULTIMODAL_TOKEN_START:
         raise ValueError(
-            f"{LM_HEAD_KEY} has {rows} rows; it does not contain image code IDs "
-            f"starting at {IMAGE_TOKEN_START}."
+            f"{LM_HEAD_KEY} has {rows} rows; it does not contain multimodal IDs "
+            f"starting at {MULTIMODAL_TOKEN_START}."
         )
     if config.get("vocab_size") != rows:
         raise ValueError(
@@ -146,7 +150,7 @@ def write_pruned_head(source: Path, destination: Path) -> None:
         for key in weights.keys():
             tensor = weights.get_tensor(key)
             if key == LM_HEAD_KEY:
-                tensor = tensor[:IMAGE_TOKEN_START].contiguous()
+                tensor = tensor[:MULTIMODAL_TOKEN_START].contiguous()
             tensors[key] = tensor
     save_file(tensors, destination, metadata=metadata)
 
@@ -173,15 +177,17 @@ def convert(args: argparse.Namespace) -> None:
         raise ValueError(f"Output path already exists: {output}")
 
     index, config, head_shard, rows, columns, element_size = inspect_source(source)
-    removed_rows = rows - IMAGE_TOKEN_START
+    removed_rows = rows - MULTIMODAL_TOKEN_START
     removed_bytes = removed_rows * columns * element_size
     print(
-        f"{LM_HEAD_KEY}: {rows}x{columns} -> {IMAGE_TOKEN_START}x{columns} "
+        f"{LM_HEAD_KEY}: {rows}x{columns} -> {MULTIMODAL_TOKEN_START}x{columns} "
         f"(removes {removed_rows:,} rows / {removed_bytes / 2**30:.2f} GiB)"
     )
     print(
-        f"Removed token-ID interval: {IMAGE_TOKEN_START}-{rows - 1}; "
-        f"this includes image codes {IMAGE_TOKEN_START}-{IMAGE_TOKEN_END} and "
+        f"Removed token-ID interval: {MULTIMODAL_TOKEN_START}-{rows - 1}; "
+        f"this includes omni/reserved/control tokens "
+        f"{OMNI_TOKEN_START}-{OMNI_TOKEN_END}, "
+        f"image codes {IMAGE_TOKEN_START}-{IMAGE_TOKEN_END}, and "
         f"audio codes {AUDIO_TOKEN_START}-{AUDIO_TOKEN_END}."
     )
     if args.dry_run:
@@ -201,7 +207,7 @@ def convert(args: argparse.Namespace) -> None:
             else:
                 copy_unchanged(source_shard, target_shard)
 
-        config["output_vocab_size"] = IMAGE_TOKEN_START
+        config["output_vocab_size"] = MULTIMODAL_TOKEN_START
         (temporary / "config.json").write_text(json.dumps(config, indent=2) + "\n")
 
         metadata = index.setdefault("metadata", {})
